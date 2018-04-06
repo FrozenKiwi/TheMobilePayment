@@ -3,3 +3,5 @@ PaymentServer/packages/
 PaymentServer/PaymentServer/bin/
 PaymentServer/PaymentServer/obj/
 PaymentAndroid/PaymentAndroid/obj/
+PaymentAndroid/.vs/
+PaymentAndroid/PaymentAndroid/bin/
