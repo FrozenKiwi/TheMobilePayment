@@ -1,3 +1,6 @@
 [submodule "pcsc-sharp"]
 	path = pcsc-sharp
 	url = https://github.com/FrozenKiwi/pcsc-sharp.git
+[submodule "Fleck"]
+	path = Fleck
+	url = https://github.com/statianzo/Fleck.git
