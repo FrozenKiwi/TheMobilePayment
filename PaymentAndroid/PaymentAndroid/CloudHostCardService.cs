@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-
+using System.Threading.Tasks;
 using Android.App;
 using Android.Content;
 using Android.Nfc.CardEmulators;
@@ -34,23 +34,38 @@ namespace PaymentAndroid
         }
         public override byte[] ProcessCommandApdu(byte[] commandApdu, Bundle extras)
         {
-            logger.Trace("Received apdu: ", BitConverter.ToString(commandApdu));
-            if (socket == null)
+            var response = SendApdu(commandApdu);
+            return response;
+        }
+
+        private byte[] SendApdu(byte[] commandApdu)
+        {
+            try
             {
-                socket = new CommSocket();
-                socket.ConnectToServerAsync().GetAwaiter().GetResult();
+                logger.Trace("Received apdu: {0}", BitConverter.ToString(commandApdu));
+                if (socket == null)
+                {
+                    socket = new CommSocket();
+                    socket.ConnectToServer();
+                }
+                var result = socket.SendRecieve(commandApdu);
+                return result;
             }
-            var result = socket.SendRecieve(commandApdu).GetAwaiter().GetResult();
-            return result;
-    }
+            catch (Exception e)
+            {
+                logger.Error(e, "ProcessCommandApdu faulted: {0}", e.StackTrace);
+                return null;
+            }
+        }
 
         public override void OnCreate()
         {
+            logger.Trace("OnCreate");
         }
 
         public override void OnDestroy()
         {
-            throw new NotImplementedException();
+            logger.Trace("OnDestroy");
         }
     }
 }

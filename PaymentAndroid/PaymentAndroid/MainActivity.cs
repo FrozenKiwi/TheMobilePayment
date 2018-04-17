@@ -8,6 +8,7 @@ using NLog.Targets;
 using Android.Content;
 using Android.Nfc;
 using Android.Nfc.CardEmulators;
+using System.Threading.Tasks;
 
 namespace PaymentAndroid
 {
@@ -64,7 +65,7 @@ namespace PaymentAndroid
 
             button.Click += delegate
             {
-                TestTransaction();
+                Task.Run(() => TestTransaction());
             };
 
             CheckThisIsDefault();
@@ -109,11 +110,12 @@ namespace PaymentAndroid
             }
         }
 
-        private async void TestTransaction()
+        private async Task TestTransaction()
         {
             using (CommSocket socket = new CommSocket())
             {
-                await socket.ConnectToServerAsync();
+                if (!socket.ConnectToServer())
+                    return;
 
                 logger.Trace("Sending SEL_FILE");
                 byte[] SEL_FILE = { 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31 };
@@ -125,11 +127,11 @@ namespace PaymentAndroid
                     P2 = 0x00, // Parameter 2
                     Data = SEL_FILE // Select PPSE (2PAY.SYS.DDF01)
                 };
-                var data_sel_file = await socket.SendRecieve(command.ToArray());
+                var data_sel_file = socket.SendRecieve(command.ToArray());
 
                 logger.Trace("Sending SEL_INTERAC");
                 byte[] SEL_INTERAC = { 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10 }; // ASCII for Interac
-                var data_sel_interac = await socket.SendRecieve(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
+                var data_sel_interac = socket.SendRecieve(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
                 {
                     CLA = 0x00, // Class
                     Instruction = InstructionCode.SelectFile,
@@ -140,7 +142,7 @@ namespace PaymentAndroid
 
                 logger.Trace("Sending GPO");
                 byte[] GPO = { 0x83, 0x13, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x01, 0x24, 0x01, 0x24, 0x82, 0x3D, 0xDE, 0x7A, 0x01 };
-                var data_gpo = await socket.SendRecieve(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
+                var data_gpo = socket.SendRecieve(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
                 {
                     CLA = 0x80, // Class
                     Instruction = (InstructionCode)168,
@@ -150,7 +152,7 @@ namespace PaymentAndroid
                 }.ToArray());
 
                 logger.Trace("Sending RR1");
-                var data_rr1 = await socket.SendRecieve(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
+                var data_rr1 = socket.SendRecieve(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
                 {
                     CLA = 0x00, // Class
                     Instruction = InstructionCode.ReadRecord,
@@ -159,7 +161,7 @@ namespace PaymentAndroid
                 }.ToArray());
 
                 logger.Trace("Sending RR2");
-                var data_rr2 = await socket.SendRecieve(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
+                var data_rr2 = socket.SendRecieve(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
                 {
                     CLA = 0x00, // Class
                     Instruction = InstructionCode.ReadRecord,

@@ -8,7 +8,6 @@
       android:description="@string/aiddescription" >
     <aid-filter android:name="@string/aid_ppse" />
     <aid-filter android:name="@string/aid_interac" />
-    <aid-filter android:name="@string/aid_visa" />
   </aid-group>
 
 </host-apdu-service>

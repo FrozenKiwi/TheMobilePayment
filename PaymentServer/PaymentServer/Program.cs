@@ -2,8 +2,9 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 
-using Fleck;
 using NLog;
 using PCSC;
 using PCSC.Iso7816;
@@ -147,76 +148,151 @@ namespace PaymentServer
             }
         }
 
+        //----------------------------------------------------------------------------
+
+        private static Logger logger = LogManager.GetLogger("Main");
+
+        private static byte[] GetResponse(byte[] data, Transaction currentTransaction, string ident)
+        {
+
+            var response = currentTransaction.SendCommand(data, ident);
+            // return a reconstructed buffer from all
+            // contained apdu's in this response
+            if (response != null)
+            {
+                byte[] swbytes = { response.SW1, response.SW2 };
+                return response.GetData().Concat(swbytes).ToArray();
+            }
+            return System.Text.Encoding.ASCII.GetBytes("ERROR");
+        }
+
+        // Incoming data from the client.  
+        //public static string data = null;
+
+        public static void StartListening()
+        {
+            // Data buffer for incoming data.  
+            //byte[] bytes = new Byte[1024];
+
+            // Establish the local endpoint for the socket.  
+            // Dns.GetHostName returns the name of the   
+            // host running the application.  
+            //IPHostEntry ipHostInfo = Dns.GetHostEntry(Dns.GetHostName());
+
+            //var ipAddress = new IPAddress(new byte[] { 192, 222, 141, 84 });
+            //IPEndPoint localEndPoint = new IPEndPoint(ipAddress, 1379);
+
+            // Bind the socket to the local endpoint and   
+            // listen for incoming connections.  
+            try
+            {
+                // Create a TCP/IP socket.  
+                Socket listener = new Socket(IPAddress.Any.AddressFamily,
+                    SocketType.Stream, ProtocolType.Tcp);
+
+                IPEndPoint localEndPoint = new IPEndPoint(IPAddress.Any, 13790);
+                listener.Bind(localEndPoint);
+                listener.Listen(10);
+
+                // Start listening for connections.  
+                while (true)
+                {
+                    logger.Info("Waiting for a connection...");
+                    // Program is suspended while waiting for an incoming connection.  
+                    Socket handler = listener.Accept();
+                    using (Transaction thisTransaction = new Transaction())
+                    {
+                        logger.Info("Connection accepted from {0}", handler.RemoteEndPoint);
+                        // Wait a max of 2 seconds before dropping this connection
+                        handler.ReceiveTimeout = 5000;
+
+                        // An incoming connection needs to be processed.  
+                        try
+                        {
+                            while (true)
+                            {
+                                var bytes = new byte[1024];
+                                int bytesRec = handler.Receive(bytes);
+                                if (bytesRec == 0)
+                                {
+                                    logger.Info("Transaction Complete");
+                                    break;
+                                }
+
+                                var input = bytes.Take(bytesRec).ToArray();
+                                var response = GetResponse(input, thisTransaction, "TODO");
+                                handler.Send(response);
+                            }
+                        }
+                        catch(SocketException e)
+                        {
+                            logger.Warn("Transaction Timeout");
+                        }
+                    }
+                    handler.Shutdown(SocketShutdown.Both);
+                    handler.Close();
+                }
+
+            }
+            catch (Exception e)
+            {
+                logger.Error(e, "Whahappen...");
+            }
+
+            Console.WriteLine("\nPress ENTER to continue...");
+            Console.Read();
+        }
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="args"></param>
         static void Main(string[] args)
         {
-            //FleckLog.Level = Fleck.LogLevel.Debug;
-            Logger logger = NLog.LogManager.GetLogger("Main");
+            StartListening();
+            //var allSockets = new List<IWebSocketConnection>();
+            //var server = new WebSocketServer("ws://0.0.0.0:1379");
+            //// Each socket has a transaction attached
+            //var socketTransactions = new ConcurrentDictionary<IWebSocketConnection, Transaction>();
 
-            var allSockets = new List<IWebSocketConnection>();
-            var server = new WebSocketServer("ws://0.0.0.0:1379");
-            // Each socket has a transaction attached
-            var socketTransactions = new ConcurrentDictionary<IWebSocketConnection, Transaction>();
+            //server.Start(socket =>
+            //{
+            //    socket.OnOpen = () =>
+            //    {
+            //        logger.Trace("Open!");
+            //        allSockets.Add(socket);
+            //    };
+            //    socket.OnClose = () =>
+            //    {
+            //        logger.Trace("Close!");
+            //        allSockets.Remove(socket);
 
-            server.Start(socket =>
-            {
-                socket.OnOpen = () =>
-                {
-                    logger.Trace("Open!");
-                    allSockets.Add(socket);
-                };
-                socket.OnClose = () =>
-                {
-                    logger.Trace("Close!");
-                    allSockets.Remove(socket);
+            //        Transaction finishedTransaction;
+            //        socketTransactions.TryRemove(socket, out finishedTransaction);
+            //        finishedTransaction?.Dispose();
 
-                    Transaction finishedTransaction;
-                    socketTransactions.TryRemove(socket, out finishedTransaction);
-                    finishedTransaction?.Dispose();
-
-                };
-                socket.OnMessage = message =>
-                {
-                    logger.Info("Message: {0}", message);
-                };
-                socket.OnBinary = data =>
-                {
-                    logger.Trace("Binary Received");
-
-                    Transaction currentTransaction = socketTransactions.GetOrAdd(socket, new Transaction());
-                    if (currentTransaction != null)
-                    {
-                        var response = currentTransaction.SendCommand(data, socket.ConnectionInfo.Origin);
-                        // return a reconstructed buffer from all
-                        // contained apdu's in this response
-                        if (response != null)
-                        {
-                            byte[] swbytes = { response.SW1, response.SW2 };
-                            var bytes = response.GetData().Concat(swbytes).ToArray();
-                            socket.Send(bytes);
-                        }
-                        else
-                        {
-                            byte[] bytes = System.Text.Encoding.ASCII.GetBytes("ERROR");
-                            socket.Send(bytes);
-                        }
-                    }
-                    else
-                    {
-                        logger.Error("No Transaction Registered!");
-                    }
-                };
-            });
+            //    };
+            //    socket.OnMessage = message =>
+            //    {
+            //        logger.Info("Message: {0}", message);
+            //    };
+            //    socket.OnBinary = data =>
+            //    {
+            //        logger.Trace("Binary Received");
 
 
-            var input = Console.ReadLine();
-            while (input != "exit")
-            {
-                foreach (var socket in allSockets.ToList())
-                {
-                    socket.Send(input);
-                }
-                input = Console.ReadLine();
-            }
+            //    };
+            //});
+
+
+            //var input = Console.ReadLine();
+            //while (input != "exit")
+            //{
+            //    foreach (var socket in allSockets.ToList())
+            //    {
+            //        socket.Send(input);
+            //    }
+            //    input = Console.ReadLine();
+            //}
         }
     }
 }
