@@ -52,11 +52,13 @@ namespace PaymentAndroid
             }
             catch (Java.IO.IOException e)
             {
-                logger.Error("Couldn't Connect- (IO) {0}: {1}\n{2}", e.ToString(), e.Message, e.StackTrace);
+                logger.Error("Couldn't Connect- (IO) {0}: {1}", e.ToString(), e.Message);
+                logger.Trace(e.StackTrace);
             }
             catch(Exception e)
             {
-                logger.Error(e, "Couldn't Connect - {0}: {1}\n{2}", e.ToString(), e.Message, e.StackTrace);
+                logger.Error(e, "Couldn't Connect - {0}: {1}", e.ToString(), e.Message);
+                logger.Trace(e.StackTrace);
             }
             return false;
         }
@@ -64,11 +66,11 @@ namespace PaymentAndroid
 
         public byte[] SendRecieve(byte[] command)
         {
-            logger.Trace("Sending {0}", BitConverter.ToString(command));
+            logger.Info("Sending");
             if (IsConnected)
             {
                 socket.OutputStream.Write(command, 0, command.Length);
-                logger.Trace("Sent {0}", BitConverter.ToString(command));
+                logger.Trace("Send complete");
 
                 byte[] response = new byte[1024];
                 int bytesRec = socket.InputStream.Read(response, 0, 1024);
@@ -78,9 +80,6 @@ namespace PaymentAndroid
                 {
                     logger.Error("Response SERVER ERROR!");
                 }
-                else
-                    logger.Trace("Response {0}", BitConverter.ToString(response, 0, bytesRec));
-
                 return response.Take(bytesRec).ToArray();
             }
             return null;

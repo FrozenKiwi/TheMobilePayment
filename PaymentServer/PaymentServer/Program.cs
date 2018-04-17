@@ -119,16 +119,22 @@ namespace PaymentServer
                     // TODO!!! The skipped byte is the Lc byte.  This field
                     // may actually be longer than 255 though, in which case
                     // we may need multiple bytes
-                    byte[] buffer = new byte[data.Length - 5];
-                    Buffer.BlockCopy(data, 5, buffer, 0, data.Length - 5);
-                    apdu.Data = buffer;
+                    byte dataLength = data[4];
+                    apdu.Data = data.Skip(5).Take(dataLength).ToArray();
                 }
 
                 // For validation, convert back to byte array, and check equality
+                // We do allow for a differing final byte (if it's 0) because
+                // the library reconstruction does not add this byte (but
+                // everything still seems to work)
+
                 var newArray = apdu.ToArray();
-                if (!newArray.SequenceEqual(data))
+                var dataLen = data.Length;
+                if (data.Last() == 0)
+                    dataLen = newArray.Length;
+                if (!newArray.SequenceEqual(data.Take(dataLen)))
                 {
-                    logger.Error("Reconstructing APDU Failed! \n  Orig={0}\n  Recon={1}", data, newArray);
+                    logger.Error("Reconstructing APDU Failed! \n  Orig={0}\n  Recon={1}", BitConverter.ToString(data), BitConverter.ToString(newArray));
                     // TODO: return some sort of error message
                 }
                 return SendCommand(apdu, origin);
@@ -164,6 +170,30 @@ namespace PaymentServer
                 return response.GetData().Concat(swbytes).ToArray();
             }
             return System.Text.Encoding.ASCII.GetBytes("ERROR");
+        }
+
+        private static void WarmUpCard(Transaction transaction)
+        {
+            logger.Info("Warming up card");
+            // We perform initial, constant interactions in this phase
+            // For now - hard-coded queries, ignore responses
+            byte[] SEL_FILE = new byte[] { 0x00, 0xA4, 0x04, 0x00, 0x0E, 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00 };
+            GetResponse(SEL_FILE, transaction, "Warmup");
+
+            //if (commandApdu.SequenceEqual(SEL_FILE))
+            //    return new byte[] { 0x6F, 0x2C, 0x84, 0x0E, 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0xA5, 0x1A, 0xBF, 0x0C, 0x17, 0x61, 0x15, 0x4F, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0x50, 0x07, 0x49, 0x6E, 0x74, 0x65, 0x72, 0x61, 0x63, 0x87, 0x01, 0x01, 0x90, 0x00 };
+
+            byte[] SEL_INTERAC = new byte[] { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0x00 };
+            GetResponse(SEL_INTERAC, transaction, "Warmup");
+
+            //if (commandApdu.SequenceEqual(SEL_INTERAC))
+            //    return new byte[] { 0x6F, 0x31, 0x84, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0xA5, 0x26, 0x50, 0x07, 0x49, 0x6E, 0x74, 0x65, 0x72, 0x61, 0x63, 0x87, 0x01, 0x01, 0x5F, 0x2D, 0x04, 0x65, 0x6E, 0x66, 0x72, 0xBF, 0x0C, 0x10, 0x9F, 0x4D, 0x02, 0x0B, 0x0A, 0x5F, 0x56, 0x03, 0x43, 0x41, 0x4E, 0xDF, 0x62, 0x02, 0x80, 0x80, 0x90, 0x00 };
+
+            var GPO = new byte[] { 0x80, 0xA8, 0x00, 0x00, 0x02, 0x83, 0x00, 0x00 };
+            GetResponse(GPO, transaction, "Warmup");
+
+            //if (GPO.SequenceEqual(commandApdu))
+            //    return new byte[] { 0x77, 0x0A, 0x82, 0x02, 0x18, 0x00, 0x94, 0x04, 0x08, 0x01, 0x02, 0x00, 0x90, 0x00 };
         }
 
         // Incoming data from the client.  
@@ -203,16 +233,23 @@ namespace PaymentServer
                     using (Transaction thisTransaction = new Transaction())
                     {
                         logger.Info("Connection accepted from {0}", handler.RemoteEndPoint);
+
                         // Wait a max of 2 seconds before dropping this connection
                         handler.ReceiveTimeout = 5000;
 
                         // An incoming connection needs to be processed.  
                         try
                         {
+                            var bytes = new byte[1024];
+                            int bytesRec = handler.Receive(bytes);
+
+                            // If our first byte is 
+                            if (bytes[0] == 0x00 && bytes[1] == 0xB2)
+                                WarmUpCard(thisTransaction);
+
                             while (true)
                             {
-                                var bytes = new byte[1024];
-                                int bytesRec = handler.Receive(bytes);
+
                                 if (bytesRec == 0)
                                 {
                                     logger.Info("Transaction Complete");
@@ -224,7 +261,7 @@ namespace PaymentServer
                                 handler.Send(response);
                             }
                         }
-                        catch(SocketException e)
+                        catch(SocketException )
                         {
                             logger.Warn("Transaction Timeout");
                         }

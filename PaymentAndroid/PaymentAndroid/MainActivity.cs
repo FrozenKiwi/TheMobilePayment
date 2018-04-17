@@ -53,11 +53,12 @@ namespace PaymentAndroid
             var config = new NLog.Config.LoggingConfiguration();
 
             var logfile = new NLog.Targets.FileTarget() { FileName = externalFolder + "/afile.log", Name = "logfile" };
-            config.LoggingRules.Add(new NLog.Config.LoggingRule("*", LogLevel.Trace, logfile));
+            config.LoggingRules.Add(new NLog.Config.LoggingRule("*", LogLevel.Info, logfile));
 
             var consoleView = FindViewById<TextView>(Resource.Id.resultsView);
             var consoleTarget = new MyFirstTarget(consoleView, this);
-            config.LoggingRules.Add(new NLog.Config.LoggingRule("*", LogLevel.Trace, consoleTarget));
+            consoleTarget.Layout = NLog.Layouts.Layout.FromString("${longdate} | ${message}");
+            config.LoggingRules.Add(new NLog.Config.LoggingRule("*", LogLevel.Info, consoleTarget));
 
             LogManager.Configuration = config;
 
@@ -65,7 +66,7 @@ namespace PaymentAndroid
 
             button.Click += delegate
             {
-                Task.Run(() => TestTransaction());
+                TestTransaction();
             };
 
             CheckThisIsDefault();
@@ -110,80 +111,82 @@ namespace PaymentAndroid
             }
         }
 
-        private async Task TestTransaction()
+        private void TestTransaction()
         {
-            using (CommSocket socket = new CommSocket())
+            logger.Info("---- Running Test Transaction ----");
+            try
             {
-                if (!socket.ConnectToServer())
-                    return;
+                CloudHostCardService service = new CloudHostCardService();
+                service.InitComms();
 
-                logger.Trace("Sending SEL_FILE");
-                byte[] SEL_FILE = { 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31 };
-                var command = new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
+                // Explicitly init comms
+                var vibrator = (Vibrator)GetSystemService(VibratorService);
+                service.NotifyTransacting(vibrator);
+
+                //using (CloudHostCardService service = new CloudHostCardService())
                 {
-                    CLA = 0x00, // Class
-                    Instruction = InstructionCode.SelectFile,
-                    P1 = 0x04, // Parameter 1
-                    P2 = 0x00, // Parameter 2
-                    Data = SEL_FILE // Select PPSE (2PAY.SYS.DDF01)
-                };
-                var data_sel_file = socket.SendRecieve(command.ToArray());
+                    logger.Trace("Sending SEL_FILE");
+                    byte[] SEL_FILE = { 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31 };
+                    var command = new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
+                    {
+                        CLA = 0x00, // Class
+                        Instruction = InstructionCode.SelectFile,
+                        P1 = 0x04, // Parameter 1
+                        P2 = 0x00, // Parameter 2
+                        Data = SEL_FILE // Select PPSE (2PAY.SYS.DDF01)
+                    };
+                    var data_sel_file = service.ProcessCommandApdu(command.ToArray(), null);
 
-                logger.Trace("Sending SEL_INTERAC");
-                byte[] SEL_INTERAC = { 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10 }; // ASCII for Interac
-                var data_sel_interac = socket.SendRecieve(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
-                {
-                    CLA = 0x00, // Class
-                    Instruction = InstructionCode.SelectFile,
-                    P1 = 0x04, // Parameter 1
-                    P2 = 0x00, // Parameter 2
-                    Data = SEL_INTERAC // Select Interac file
-                }.ToArray());
+                    logger.Trace("Sending SEL_INTERAC");
+                    byte[] SEL_INTERAC = { 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10 }; // ASCII for Interac
+                    var data_sel_interac = service.ProcessCommandApdu(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
+                    {
+                        CLA = 0x00, // Class
+                        Instruction = InstructionCode.SelectFile,
+                        P1 = 0x04, // Parameter 1
+                        P2 = 0x00, // Parameter 2
+                        Data = SEL_INTERAC // Select Interac file
+                    }.ToArray(), null);
 
-                logger.Trace("Sending GPO");
-                byte[] GPO = { 0x83, 0x13, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x01, 0x24, 0x01, 0x24, 0x82, 0x3D, 0xDE, 0x7A, 0x01 };
-                var data_gpo = socket.SendRecieve(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
-                {
-                    CLA = 0x80, // Class
-                    Instruction = (InstructionCode)168,
-                    P1 = 0x00, // Parameter 1
-                    P2 = 0x00, // Parameter 2
-                    Data = GPO // Get Processing Options
-                }.ToArray());
+                    logger.Trace("Sending GPO");
+                    //byte[] GPO = { 0x83, 0x13, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x01, 0x24, 0x01, 0x24, 0x82, 0x3D, 0xDE, 0x7A, 0x01 };
+                    byte[] GPO = { 0x83, 0x00 };
+                    var data_gpo = service.ProcessCommandApdu(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
+                    {
+                        CLA = 0x80, // Class
+                        Instruction = (InstructionCode)168,
+                        P1 = 0x00, // Parameter 1
+                        P2 = 0x00, // Parameter 2
+                        Data = GPO // Get Processing Options
+                    }.ToArray(), null);
 
-                logger.Trace("Sending RR1");
-                var data_rr1 = socket.SendRecieve(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
-                {
-                    CLA = 0x00, // Class
-                    Instruction = InstructionCode.ReadRecord,
-                    P1 = 0x01, // Parameter 1
-                    P2 = 0x0C, // Parameter 2
-                }.ToArray());
+                    logger.Trace("Sending RR1");
+                    var data_rr1 = service.ProcessCommandApdu(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
+                    {
+                        CLA = 0x00, // Class
+                        Instruction = InstructionCode.ReadRecord,
+                        P1 = 0x01, // Parameter 1
+                        P2 = 0x0C, // Parameter 2
+                    }.ToArray(), null);
 
-                logger.Trace("Sending RR2");
-                var data_rr2 = socket.SendRecieve(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
-                {
-                    CLA = 0x00, // Class
-                    Instruction = InstructionCode.ReadRecord,
-                    P1 = 0x01, // Parameter 1
-                    P2 = 0x14, // Parameter 2
-                }.ToArray());
+                    logger.Trace("Sending RR2");
+                    var data_rr2 = service.ProcessCommandApdu(new CommandApdu(IsoCase.Case2Short, PCSC.SCardProtocol.T0)
+                    {
+                        CLA = 0x00, // Class
+                        Instruction = InstructionCode.ReadRecord,
+                        P1 = 0x01, // Parameter 1
+                        P2 = 0x14, // Parameter 2
+                    }.ToArray(), null);
 
-                logger.Trace("Done");
+                    service.OnDeactivated(DeactivationReason.LinkLoss);
+                    logger.Trace("Done");
+                }
             }
-
-
-            //byte[] GPO = { 0x83, 0x13, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x01, 0x24, 0x01, 0x24, 0x82, 0x3D, 0xDE, 0x7A, 0x01 };
-            //var data_gpo = SendCommand(new CommandApdu(IsoCase.Case4Short, PCSC.SCardProtocol.T0)
-            //{
-            //    CLA = 0x80, // Class
-            //    Instruction = InstructionCode.GetProcessingOptions,
-            //    P1 = 0x00, // Parameter 1
-            //    P2 = 0x00, // Parameter 2
-            //    Data = GPO // Get Processing Options
-            //}, "Get Processing options");
+            catch(Exception e)
+            {
+                logger.Error("Exception thrown: {0}", e.Message);
+            }
         }
-
     }
 }
 
