@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using NLog;
 using PCSC;
 using PCSC.Iso7816;
+using BerTlv;
 
 namespace PaymentServer
 {
@@ -98,6 +99,13 @@ namespace PaymentServer
                 return response;
             }
 
+            public CommandApdu InitApdu(bool hasData)
+            {
+                IsoCase commandCase = hasData ? IsoCase.Case4Short : IsoCase.Case2Short;
+
+                return new CommandApdu(commandCase, Reader.ActiveProtocol);
+            }
+
             public Response SendCommand(byte[] data, String origin)
             {
                 // We could simply pass the data directly through by 
@@ -106,9 +114,7 @@ namespace PaymentServer
                 // a bit of additional work on reading to ensure we
                 // interface with the card correctly, so we route through it
                 bool hasData = data.Length > 5;
-                IsoCase commandCase = hasData ? IsoCase.Case4Short : IsoCase.Case2Short;
-
-                CommandApdu apdu = new CommandApdu(commandCase, Reader.ActiveProtocol);
+                CommandApdu apdu = InitApdu(hasData);
                 apdu.CLA = data[0];
                 apdu.Instruction = (InstructionCode)data[1];
                 apdu.P1 = data[2];
@@ -172,25 +178,156 @@ namespace PaymentServer
             return System.Text.Encoding.ASCII.GetBytes("ERROR");
         }
 
+        private static byte[] FindValue(Tlv tlv, IEnumerator<string> tags)
+        {
+            if (tlv.HexTag == tags.Current)
+            {
+                if (!tags.MoveNext())
+                    return tlv.Value;
+
+                foreach (Tlv child in tlv.Children)
+                {
+                    var val = FindValue(child, tags);
+                    if (val != null)
+                        return val;
+                }
+            }
+            return null;
+        }
+
+        private static byte[] FindValue(Tlv tlv, IEnumerable<string> tags)
+        {
+            var enumerator = tags.GetEnumerator();
+            if (enumerator.MoveNext())
+                return FindValue(tlv, enumerator);
+            return null;
+        }
+
+        struct RecordAddress
+        {
+            public int SFI;
+            public byte FromRecord;
+            public byte ToRecord;
+            public int OfflineAddress;
+        }
+
+        private static List<RecordAddress> ParseAddresses(byte[] data)
+        {
+            List<RecordAddress> results = new List<RecordAddress>();
+            for (int idx = 0; idx < data.Length; idx += 4)
+            {
+                var newAddress = new RecordAddress()
+                {
+                    SFI             = data[idx + 0] >> 3,
+                    FromRecord      = data[idx + 1],
+                    ToRecord        = data[idx + 2],
+                    OfflineAddress  = data[idx + 3],
+                };
+                results.Add(newAddress);
+            }
+            return results;
+        }
+
+        private static void BuildReadRecordApdu(CommandApdu command, RecordAddress address, byte idx)
+        {
+            command.CLA = 0;
+            command.Instruction = InstructionCode.ReadRecord;
+            command.P1 = idx;
+            command.P2 = (byte)((address.SFI << 3) + 0x4);
+        }
+        
         private static void WarmUpCard(Transaction transaction)
         {
             logger.Info("Warming up card");
+
+
             // We perform initial, constant interactions in this phase
             // For now - hard-coded queries, ignore responses
             byte[] SEL_FILE = new byte[] { 0x00, 0xA4, 0x04, 0x00, 0x0E, 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0x00 };
-            GetResponse(SEL_FILE, transaction, "Warmup");
+            var selResponse = GetResponse(SEL_FILE, transaction, "Select Payment");
+            var tlvSelResponse = Tlv.ParseTlv(selResponse);
+
+
+            var paymentApp = tlvSelResponse;
+            var SelApp = transaction.InitApdu(true);
+            SelApp.Instruction = InstructionCode.SelectFile;
+            SelApp.P1 = 0x04; // read the first file (I think?)
+            SelApp.Data = FindValue(tlvSelResponse.First(), new string[] { "6F", "A5", "BF0C", "61", "4F" });
+            var appResponse = transaction.SendCommand(SelApp, "Select App");
+
+            // Extract the PDOL
+            var appTlv = Tlv.ParseTlv(appResponse.GetData());
+            var pdolData = FindValue(appTlv.First(), new string[] { "6F", "A5", "9F38" });
+            var pdolParsed = PDOL.ParsePDOL(pdolData);
+
+            // Normally this would get sent back to the client to be filled by the terminal
+            PDOL.FillWithDummyData(pdolParsed);
+
+            var gpo = transaction.InitApdu(true);
+            gpo.CLA = 0x80;
+            gpo.Instruction = (InstructionCode)0xA8;
+            gpo.Data = PDOL.GeneratePDOL(pdolParsed);
+            var gpoResponse = transaction.SendCommand(gpo, "GPO");
+
+            var gpoTlv = Tlv.ParseTlv(gpoResponse.GetData());
+            var fileData = FindValue(gpoTlv.First(), new string[] { "77", "94" });
+
+            var fileList = ParseAddresses(fileData);
+            byte[] cdol = null;
+            foreach(var file in fileList)
+            {
+                for (byte recordNum = file.FromRecord; recordNum <= file.ToRecord; recordNum++)
+                {
+                    var rr = transaction.InitApdu(false);
+                    BuildReadRecordApdu(rr, file, recordNum);
+                    var record = transaction.SendCommand(rr, "ReadRecord");
+                    var rrtlv = Tlv.ParseTlv(record.GetData());
+                    if (cdol == null)
+                        cdol = FindValue(rrtlv.First(), new string[] { "70", "8C" });
+                }
+            }
+
+            if (cdol != null)
+            {
+                var cdolParsed = PDOL.ParsePDOL(cdol);
+
+                PDOL.FillWithDummyData(cdolParsed);
+
+                var GenerateCrypto = transaction.InitApdu(true);
+                GenerateCrypto.CLA = 0x80;
+                GenerateCrypto.Instruction = (InstructionCode)0xAE;
+                GenerateCrypto.P1 = 0x80;
+                GenerateCrypto.Data = PDOL.GenerateCDOL(cdolParsed);
+
+                var fuckinAye = transaction.SendCommand(GenerateCrypto, "GenerateCrypto");
+                var faBytes = fuckinAye.GetData();
+            }
 
             //if (commandApdu.SequenceEqual(SEL_FILE))
             //    return new byte[] { 0x6F, 0x2C, 0x84, 0x0E, 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0xA5, 0x1A, 0xBF, 0x0C, 0x17, 0x61, 0x15, 0x4F, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0x50, 0x07, 0x49, 0x6E, 0x74, 0x65, 0x72, 0x61, 0x63, 0x87, 0x01, 0x01, 0x90, 0x00 };
 
-            byte[] SEL_INTERAC = new byte[] { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0x00 };
-            GetResponse(SEL_INTERAC, transaction, "Warmup");
+            //byte[] SEL_INTERAC = new byte[] { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0x00 };
+            ////transaction.SendCommand(SEL_INTERAC, transaction, "Select Interac");
+            ////var tlvSelResponse = BerTlv.Tlv.ParseTlv(selResponse);
 
-            //if (commandApdu.SequenceEqual(SEL_INTERAC))
-            //    return new byte[] { 0x6F, 0x31, 0x84, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0xA5, 0x26, 0x50, 0x07, 0x49, 0x6E, 0x74, 0x65, 0x72, 0x61, 0x63, 0x87, 0x01, 0x01, 0x5F, 0x2D, 0x04, 0x65, 0x6E, 0x66, 0x72, 0xBF, 0x0C, 0x10, 0x9F, 0x4D, 0x02, 0x0B, 0x0A, 0x5F, 0x56, 0x03, 0x43, 0x41, 0x4E, 0xDF, 0x62, 0x02, 0x80, 0x80, 0x90, 0x00 };
+            //byte[] GET_ATC = new byte[] { 0x80, 0xCA, 0x9F, 0x36, 0x00 };
+            //var r1 = GetResponse(GET_ATC, transaction, "Get App Transaction Counter");
 
-            var GPO = new byte[] { 0x80, 0xA8, 0x00, 0x00, 0x02, 0x83, 0x00, 0x00 };
-            GetResponse(GPO, transaction, "Warmup");
+            //byte[] GET_OATC = new byte[] { 0x80, 0xCA, 0x9F, 0x13, 0x00 };
+            //var r2 = GetResponse(GET_OATC, transaction, "Get App Transaction Counter (Online)");
+
+            //byte[] GET_PINC = new byte[] { 0x80, 0xCA, 0x9F, 0x17, 0x00 };
+            //var r3 = GetResponse(GET_PINC, transaction, "Get Pin Tries");
+
+            //byte[] GET_LOG = new byte[] { 0x80, 0xCA, 0x9F, 0x4F, 0x00 };
+            //var r4 = GetResponse(GET_LOG, transaction, "Get Log");
+
+
+            ////if (commandApdu.SequenceEqual(SEL_INTERAC))
+            ////    return new byte[] { 0x6F, 0x31, 0x84, 0x07, 0xA0, 0x00, 0x00, 0x02, 0x77, 0x10, 0x10, 0xA5, 0x26, 0x50, 0x07, 0x49, 0x6E, 0x74, 0x65, 0x72, 0x61, 0x63, 0x87, 0x01, 0x01, 0x5F, 0x2D, 0x04, 0x65, 0x6E, 0x66, 0x72, 0xBF, 0x0C, 0x10, 0x9F, 0x4D, 0x02, 0x0B, 0x0A, 0x5F, 0x56, 0x03, 0x43, 0x41, 0x4E, 0xDF, 0x62, 0x02, 0x80, 0x80, 0x90, 0x00 };
+
+            //var GPO = new byte[] { 0x80, 0xA8, 0x00, 0x00, 0x02, 0x83, 0x00, 0x00 };
+            //GetResponse(GPO, transaction, "Warmup");
 
             //if (GPO.SequenceEqual(commandApdu))
             //    return new byte[] { 0x77, 0x0A, 0x82, 0x02, 0x18, 0x00, 0x94, 0x04, 0x08, 0x01, 0x02, 0x00, 0x90, 0x00 };
@@ -204,13 +341,12 @@ namespace PaymentServer
             // Data buffer for incoming data.  
             //byte[] bytes = new Byte[1024];
 
-            // Establish the local endpoint for the socket.  
-            // Dns.GetHostName returns the name of the   
-            // host running the application.  
-            //IPHostEntry ipHostInfo = Dns.GetHostEntry(Dns.GetHostName());
+            {
+                Transaction thisTransaction = new Transaction();
+                WarmUpCard(thisTransaction);
 
-            //var ipAddress = new IPAddress(new byte[] { 192, 222, 141, 84 });
-            //IPEndPoint localEndPoint = new IPEndPoint(ipAddress, 1379);
+                return;
+            }
 
             // Bind the socket to the local endpoint and   
             // listen for incoming connections.  
